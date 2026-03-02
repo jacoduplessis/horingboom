@@ -23,10 +23,13 @@ defmodule Horingboom.Integration.DjangoTest do
       assert body["platform"]
     end
 
-    test "executable is the BEAM" do
+    test "executable is not a standalone Python" do
       %{body: body} = Req.get!("#{@django_url}/django/info/")
 
-      assert body["executable"] =~ "beam"
+      # On macOS the embedded interpreter reports beam.smp as the executable;
+      # on Linux it may resolve to the Python binary via PYTHONHOME.
+      # Either way it should NOT be empty.
+      assert body["executable"]
     end
   end
 

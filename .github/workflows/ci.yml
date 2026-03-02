@@ -45,11 +45,16 @@ jobs:
         with:
           version: "latest"
 
-      - name: Install Python 3.14 and set PYTHONHOME
+      - name: Install Python 3.14 and configure environment
         run: |
           uv python install 3.14
           PYTHON_BIN=$(uv python find 3.14)
-          echo "PYTHONHOME=$(dirname $(dirname $PYTHON_BIN))" >> $GITHUB_ENV
+          PYTHON_ROOT=$(dirname $(dirname $PYTHON_BIN))
+          echo "PYTHONHOME=$PYTHON_ROOT" >> $GITHUB_ENV
+          # Put uv Python first on PATH so cmake finds it during mix compile
+          echo "$PYTHON_ROOT/bin" >> $GITHUB_PATH
+          # Hint for cmake's find_package(Python3)
+          echo "Python3_ROOT=$PYTHON_ROOT" >> $GITHUB_ENV
 
       - name: Install Python dependencies
         working-directory: python/django_app
@@ -67,21 +72,7 @@ jobs:
       - name: Install Mix dependencies
         run: mix deps.get
 
-      - name: Build erlang_python NIF against Python 3.14
-        run: |
-          PYTHON_BIN=$(uv python find 3.14)
-          PYTHON_ROOT=$(dirname $(dirname $PYTHON_BIN))
-          cd deps/erlang_python
-          rm -rf _build/cmake
-          mkdir -p _build/cmake
-          cd _build/cmake
-          cmake ../../c_src \
-            -DPython3_EXECUTABLE="$PYTHON_ROOT/bin/python3.14" \
-            -DPython3_INCLUDE_DIR="$PYTHON_ROOT/include/python3.14" \
-            -DPython3_LIBRARY="$PYTHON_ROOT/lib/libpython3.14.so"
-          cmake --build .
-
-      - name: Compile
+      - name: Compile (erlang_python NIF builds against Python 3.14 via Python3_ROOT)
         run: mix compile --warnings-as-errors
 
       - name: Check formatting
