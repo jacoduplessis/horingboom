@@ -3,9 +3,9 @@ defmodule Horingboom.Notes.Note do
   import Ecto.Changeset
 
   schema "notes" do
-    field :title, :string
-    field :body, :string
-    field :source, :string
+    field(:title, :string)
+    field(:body, :string)
+    field(:source, :string)
 
     timestamps(type: :utc_datetime)
   end

@@ -130,13 +130,34 @@ curl http://localhost:4000/api/notes
 curl http://localhost:8001/django/notes/
 ```
 
+## Testing
+
+Unit tests (Phoenix controllers, Ecto schemas, contexts):
+
+```sh
+mix test
+```
+
+Integration tests boot Django via hornbeam and make real HTTP calls. They require `PYTHONHOME`, `PYTHON_THREAD_STACK_SIZE`, and `DATABASE_NAME` so Django's psycopg connects to the test database:
+
+```sh
+DATABASE_NAME=horingboom_test \
+PYTHONHOME=$(uv python find 3.14 | sed 's|/bin/python3.14||') \
+PYTHON_THREAD_STACK_SIZE=33554432 \
+mix test --include integration
+```
+
+Integration tests are excluded by default (`@moduletag :integration`) and run serially. The `setup` callback truncates shared tables between tests since Django's psycopg bypasses the Ecto sandbox.
+
+CI runs both suites via GitHub Actions (`.github/workflows/ci.yml`).
+
 ## Workarounds
 
-**`PYTHONHOME` required at startup.** The erlang_python NIF calls `Py_InitializeFromConfig` with a default `PyConfig` that doesn't set `home`. Since the host process is `beam.smp` (not a Python executable), the interpreter can't locate its standard library without `PYTHONHOME` in the environment. This must be set before the BEAM starts — `config/runtime.exs` is too late because `erlang_python` starts as a dependency before the app boots.
+**`PYTHONHOME` required at startup.** The erlang_python NIF calls `Py_InitializeFromConfig` with a default `PyConfig` that doesn't set `home`. Since the host process is `beam.smp` (not a Python executable), the interpreter can't locate its standard library without `PYTHONHOME` in the environment. This must be set before the BEAM starts — setting it in `config/runtime.exs` is too late because `erlang_python` loads as a dependency before the app boots.
 
-**`PYTHON_THREAD_STACK_SIZE` needed for CPython 3.14.** BEAM scheduler threads have smaller stacks than Python expects. Without `PYTHON_THREAD_STACK_SIZE=16777216` (16MB), the embedded interpreter hits "Unrecoverable stack overflow" during Django initialization. This wasn't needed with free-threaded Python 3.14t.
+**`PYTHON_THREAD_STACK_SIZE` needed for CPython 3.14.** BEAM scheduler threads have smaller stacks than Python expects. Without this, the embedded interpreter hits "Unrecoverable stack overflow" during Django initialization. Use 16MB (`16777216`) for development and 32MB (`33554432`) for tests.
 
-**`hornbeam_erlang.call()` not wired up.** The Python-side `hornbeam_erlang.call(name)` routes through a `hornbeam_callbacks` bridge function that isn't registered as a py_callback. The `hornbeam_erlang.state_keys()` function has the same issue with `hornbeam_state`. Use the `erlang` module directly to call registered functions, and avoid `state_keys()`:
+**`hornbeam_erlang.call()` not wired up.** The Python-side `hornbeam_erlang.call(name)` routes through a `hornbeam_callbacks` bridge function that isn't registered as a py_callback. The `hornbeam_erlang.state_keys()` function has the same issue. Use the `erlang` module directly to call registered functions, and avoid `state_keys()`:
 
 ```python
 # Instead of: from hornbeam_erlang import call
@@ -151,10 +172,14 @@ from hornbeam_erlang import state_get, state_set, state_incr, state_decr, state_
 
 ```
 horingboom/
+├── .github/
+│   └── workflows/
+│       └── ci.yml              # GitHub Actions (unit + integration tests)
 ├── config/
 │   ├── config.exs              # Ecto repos config
 │   ├── dev.exs                 # Repo database config
-│   └── runtime.exs             # PYTHONHOME note
+│   ├── test.exs                # Test database, sandbox pool
+│   └── runtime.exs             # Port config, prod secrets
 ├── lib/
 │   ├── horingboom/
 │   │   ├── application.ex      # Supervision tree (Repo, HornbeamServer)
@@ -176,12 +201,21 @@ horingboom/
 ├── python/
 │   └── django_app/             # uv-managed, Python 3.14
 │       ├── demo/
-│       │   ├── settings.py     # Postgres config
+│       │   ├── settings.py     # Postgres config (DATABASE_NAME env var)
 │       │   ├── urls.py
 │       │   └── wsgi.py
 │       └── api/
 │           ├── models.py       # Note model (managed=False)
 │           └── views.py        # Views using hornbeam_erlang + erlang + psycopg
+├── test/
+│   ├── support/
+│   │   ├── conn_case.ex        # Phoenix.ConnCase with Ecto sandbox
+│   │   ├── data_case.ex        # Ecto DataCase for context tests
+│   │   └── integration_case.ex # Boots HornbeamServer, truncates between tests
+│   ├── integration/
+│   │   ├── django_test.exs     # Django endpoint tests (HTTP via Req)
+│   │   └── cross_runtime_test.exs  # Cross-runtime ETS + Postgres tests
+│   └── horingboom/             # Unit tests (schemas, contexts, controllers)
 └── mix.exs                     # hornbeam, ecto_sql, postgrex deps
 ```
 
