@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  MIX_ENV: test
+  DATABASE_NAME: horingboom_test
+  PYTHON_THREAD_STACK_SIZE: "33554432"
+
+jobs:
+  test:
+    name: Unit & Integration Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: horingboom_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Erlang & Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+
+      - name: Install Python 3.14 via uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "latest"
+
+      - name: Install Python 3.14 and set PYTHONHOME
+        run: |
+          uv python install 3.14
+          PYTHON_BIN=$(uv python find 3.14)
+          echo "PYTHONHOME=$(dirname $(dirname $PYTHON_BIN))" >> $GITHUB_ENV
+
+      - name: Install Python dependencies
+        working-directory: python/django_app
+        run: uv sync
+
+      - name: Cache Mix deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-
+
+      - name: Install Mix dependencies
+        run: mix deps.get
+
+      - name: Build erlang_python NIF against Python 3.14
+        run: |
+          PYTHON_BIN=$(uv python find 3.14)
+          PYTHON_ROOT=$(dirname $(dirname $PYTHON_BIN))
+          cd deps/erlang_python
+          rm -rf _build/cmake
+          mkdir -p _build/cmake
+          cd _build/cmake
+          cmake ../../c_src \
+            -DPython3_EXECUTABLE="$PYTHON_ROOT/bin/python3.14" \
+            -DPython3_INCLUDE_DIR="$PYTHON_ROOT/include/python3.14" \
+            -DPython3_LIBRARY="$PYTHON_ROOT/lib/libpython3.14.so"
+          cmake --build .
+
+      - name: Compile
+        run: mix compile --warnings-as-errors
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: Run unit tests
+        run: mix test
+
+      - name: Run integration tests
+        run: mix test --include integration

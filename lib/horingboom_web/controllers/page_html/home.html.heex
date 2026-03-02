@@ -1,0 +1,113 @@
+<Layouts.flash_group flash={@flash} />
+<div class="px-4 py-10 sm:px-6 sm:py-28 lg:px-8 xl:px-28 xl:py-32">
+  <div class="mx-auto max-w-2xl">
+    <h1 class="text-4xl font-bold tracking-tight">Horingboom PoC</h1>
+    <p class="mt-4 text-lg text-base-content/70">
+      Phoenix + Django running on the same BEAM node via
+      <a href="https://hex.pm/packages/hornbeam" class="underline font-semibold">hornbeam</a>,
+      sharing a Postgres database.
+    </p>
+
+    <div class="mt-10 grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <div class="rounded-box bg-base-200 p-6">
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-base-content/50">Phoenix</h2>
+        <p class="mt-1 text-xl font-semibold">Elixir {System.version()}</p>
+        <p class="text-sm text-base-content/60">
+          OTP {to_string(:erlang.system_info(:otp_release))} &bull; Port 4000
+        </p>
+      </div>
+      <div class="rounded-box bg-base-200 p-6">
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-base-content/50">Django</h2>
+        <p class="mt-1 text-xl font-semibold">Python 3.14</p>
+        <p class="text-sm text-base-content/60">hornbeam 1.4.1 &bull; Port 8001</p>
+      </div>
+    </div>
+
+    <h2 class="mt-10 text-xl font-semibold">Shared Postgres</h2>
+    <p class="mt-1 text-sm text-base-content/60">
+      Both runtimes read and write the same <code>notes</code> table.
+    </p>
+
+    <div class="mt-4 grid grid-cols-1 gap-3">
+      <a
+        href="/api/notes"
+        class="group rounded-box border border-base-300 px-5 py-4 hover:bg-base-200 transition"
+      >
+        <div class="font-semibold group-hover:underline">GET /api/notes</div>
+        <div class="text-sm text-base-content/60">
+          List all notes from Phoenix (Ecto/Postgrex)
+        </div>
+      </a>
+      <a
+        href="http://localhost:8001/django/notes/"
+        class="group rounded-box border border-base-300 px-5 py-4 hover:bg-base-200 transition"
+      >
+        <div class="font-semibold group-hover:underline">GET /django/notes/</div>
+        <div class="text-sm text-base-content/60">
+          List all notes from Django (psycopg)
+        </div>
+      </a>
+    </div>
+
+    <h2 class="mt-10 text-xl font-semibold">Shared ETS State</h2>
+    <p class="mt-1 text-sm text-base-content/60">
+      In-memory state shared between Elixir and Python via hornbeam's ETS bridge.
+    </p>
+
+    <div class="mt-4 grid grid-cols-1 gap-3">
+      <a
+        href="/api/state"
+        class="group rounded-box border border-base-300 px-5 py-4 hover:bg-base-200 transition"
+      >
+        <div class="font-semibold group-hover:underline">GET /api/state</div>
+        <div class="text-sm text-base-content/60">
+          Read all shared ETS state from Phoenix
+        </div>
+      </a>
+      <a
+        href="http://localhost:8001/django/shared-state/"
+        class="group rounded-box border border-base-300 px-5 py-4 hover:bg-base-200 transition"
+      >
+        <div class="font-semibold group-hover:underline">GET /django/shared-state/</div>
+        <div class="text-sm text-base-content/60">
+          Read/write shared ETS state from Django
+        </div>
+      </a>
+    </div>
+
+    <h2 class="mt-10 text-xl font-semibold">Django Endpoints</h2>
+    <p class="mt-1 text-sm text-base-content/60">
+      Served by hornbeam on port 8001, running inside the BEAM.
+    </p>
+
+    <div class="mt-4 grid grid-cols-1 gap-3">
+      <a
+        href="http://localhost:8001/django/"
+        class="group rounded-box border border-base-300 px-5 py-4 hover:bg-base-200 transition"
+      >
+        <div class="font-semibold group-hover:underline">GET /django/</div>
+        <div class="text-sm text-base-content/60">
+          Hello from Django with ETS page-view counter
+        </div>
+      </a>
+      <a
+        href="http://localhost:8001/django/call-elixir/"
+        class="group rounded-box border border-base-300 px-5 py-4 hover:bg-base-200 transition"
+      >
+        <div class="font-semibold group-hover:underline">GET /django/call-elixir/</div>
+        <div class="text-sm text-base-content/60">
+          Call registered Elixir functions from Python
+        </div>
+      </a>
+      <a
+        href="http://localhost:8001/django/info/"
+        class="group rounded-box border border-base-300 px-5 py-4 hover:bg-base-200 transition"
+      >
+        <div class="font-semibold group-hover:underline">GET /django/info/</div>
+        <div class="text-sm text-base-content/60">
+          Python runtime info
+        </div>
+      </a>
+    </div>
+  </div>
+</div>
