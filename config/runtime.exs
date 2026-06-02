@@ -20,8 +20,11 @@ if System.get_env("PHX_SERVER") do
   config :horingboom, HoringboomWeb.Endpoint, server: true
 end
 
-config :horingboom, HoringboomWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+# Test env sets its own port in config/test.exs; PORT here would clobber it.
+if config_env() != :test do
+  config :horingboom, HoringboomWeb.Endpoint,
+    http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+end
 
 if config_env() == :prod do
   # The secret key base is used to sign/encrypt cookies and other secrets.

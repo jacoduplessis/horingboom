@@ -14,15 +14,17 @@ config :horingboom, Horingboom.Repo,
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: 10
 
-# Don't start hornbeam/Python in test — tests for the Phoenix side only
-config :horingboom, start_hornbeam: false
+# INTEGRATION=true brings up hornbeam (Python + Django) and runs Phoenix's
+# real HTTP listener so integration tests can hit the same single-port setup
+# the dev/prod app uses. Unit tests don't need either — they use Plug.Test.
+integration? = System.get_env("INTEGRATION") == "true"
 
-# We don't run a server during test. If one is required,
-# you can enable the server option below.
+config :horingboom, start_hornbeam: integration?
+
 config :horingboom, HoringboomWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
   secret_key_base: "ULijfrlDzBKVtDsApA/RJWkzDP2TaU3KZgaYQLZnAuyhO3uuU04co3oc93Hq1/Xm",
-  server: false
+  server: integration?
 
 # Print only warnings and errors during test
 config :logger, level: :warning

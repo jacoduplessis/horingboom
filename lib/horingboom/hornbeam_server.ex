@@ -21,13 +21,24 @@ defmodule Horingboom.HornbeamServer do
 
     Logger.info("Starting hornbeam with Django app at #{django_path}")
 
+    num_contexts =
+      case System.get_env("HORNBEAM_CONTEXTS") do
+        nil -> 2
+        v -> String.to_integer(v)
+      end
+
+    # Hornbeam always binds an HTTP listener. We don't want a second port —
+    # bind ephemerally and shut the listener down. Python runtime, worker pool,
+    # lifespan state, and registered callbacks stay alive.
     :hornbeam.start("demo.wsgi:application", %{
-      bind: "127.0.0.1:8001",
-      num_contexts: 2,
+      bind: "127.0.0.1:0",
+      num_contexts: num_contexts,
       worker_class: :wsgi,
       venv: venv_path,
       pythonpath: [django_path]
     })
+
+    :ranch.stop_listener(:hornbeam_http)
 
     :hornbeam.register_function("system_info", fn _args ->
       %{
@@ -62,9 +73,42 @@ defmodule Horingboom.HornbeamServer do
       Horingboom.HornbeamServer.ecto_tx_rollback(tx_id)
     end)
 
-    Logger.info("Hornbeam started — Django available at http://127.0.0.1:8001/django/")
+    inject_django_dispatch()
+
+    Logger.info("Hornbeam ready — Django mounted at /django/* on Phoenix's listener")
 
     {:ok, %{}}
+  end
+
+  # Phoenix's Cowboy2Adapter reads :http from endpoint config and supports a
+  # :dispatch override (see deps/phoenix/lib/phoenix/endpoint/cowboy2_adapter.ex
+  # docstring). Patching the endpoint config here, before the endpoint child
+  # starts, gives us a single cowboy listener with /django/* routed to hornbeam
+  # and everything else through Phoenix.
+  defp inject_django_dispatch do
+    # Mirrors the map hornbeam builds internally at
+    # deps/hornbeam/src/hornbeam.erl:659-665 for its catchall handler. Not a
+    # public API — if upstream adds fields, Django requests will start failing.
+    django_state = %{
+      worker_class: :wsgi,
+      app_module: "demo.wsgi",
+      app_callable: "application",
+      timeout: 30_000,
+      lifespan_state: :hornbeam_lifespan.get_state()
+    }
+
+    dispatch = [
+      {:_,
+       [
+         {"/django/[...]", :hornbeam_handler, django_state},
+         {:_, Plug.Cowboy.Handler, {HoringboomWeb.Endpoint, []}}
+       ]}
+    ]
+
+    endpoint_config = Application.get_env(:horingboom, HoringboomWeb.Endpoint, [])
+    http_config = Keyword.get(endpoint_config, :http, []) |> Keyword.put(:dispatch, dispatch)
+    updated = Keyword.put(endpoint_config, :http, http_config)
+    Application.put_env(:horingboom, HoringboomWeb.Endpoint, updated)
   end
 
   # Bridge: run SQL through Horingboom.Repo so Django's ORM can share Ecto's

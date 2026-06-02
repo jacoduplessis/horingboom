@@ -7,43 +7,48 @@ Hornbeam embeds a Python interpreter directly in the Erlang VM through a NIF, so
 ## How it works
 
 ```
-┌───────────────────────────────────────────────────────┐
-│                    BEAM VM (OTP 28)                   │
-│                                                       │
-│  ┌─────────────┐          ┌────────────────────┐      │
-│  │   Phoenix   │          │     hornbeam       │      │
-│  │  :4000      │          │  (cowboy :8001)    │      │
-│  │             │          │        │           │      │
-│  │  Ecto +     │          │  Django WSGI app   │      │
-│  │  Postgrex   │          │  via erlang_python │      │
-│  │             │          │  NIF (Python 3.14) │      │
-│  └──────┬──────┘          └────────┬───────────┘      │
-│         │                          │                  │
-│         │    ┌─────────────────────┘                  │
-│         │    │                                        │
-│         ▼    ▼                                        │
-│  ┌──────────────────────────────────────┐             │
-│  │         Shared ETS tables            │             │
-│  │  hornbeam_erlang.state_get/set/incr  │             │
-│  │  erlang.call (→ registered Elixir fn)│             │
-│  └──────────────────────────────────────┘             │
-│         │    │                                        │
-│         ▼    ▼                                        │
-│  ┌──────────────────────────────────────┐             │
-│  │        Postgres (shared)             │             │
-│  │  Phoenix writes via Ecto/Postgrex    │             │
-│  │  Django writes via psycopg           │             │
-│  └──────────────────────────────────────┘             │
-└───────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│                     BEAM VM (OTP 28)                       │
+│                                                            │
+│              ┌──────────────────────────┐                  │
+│         ┌──▶ │   cowboy :4000           │ ◀──┐             │
+│         │    │   single dispatch table  │    │             │
+│         │    └──────────┬───────────────┘    │             │
+│         │               │ /django/[...]      │             │
+│         │  catchall ┌───┴───┐                │             │
+│         │           ▼       ▼                │             │
+│  ┌──────┴──────┐  ┌──────────────────┐       │             │
+│  │   Phoenix   │  │ hornbeam_handler │       │             │
+│  │  endpoint   │  │ (WSGI bridge)    │       │             │
+│  │             │  │      │           │       │             │
+│  │  Ecto +     │  │ Django WSGI app  │       │             │
+│  │  Postgrex   │  │ via erlang_python│       │             │
+│  │             │  │ NIF (Python 3.14)│       │             │
+│  └──────┬──────┘  └────────┬─────────┘       │             │
+│         │                  │                 │             │
+│         │   ┌──────────────┘                 │             │
+│         │   │                                │             │
+│         ▼   ▼                                │             │
+│  ┌──────────────────────────────────────┐    │             │
+│  │         Shared ETS tables            │ ───┘             │
+│  │  hornbeam_erlang.state_get/set/incr  │                  │
+│  │  erlang.call (→ registered Elixir fn)│                  │
+│  └──────────────────────────────────────┘                  │
+│         │   │                                              │
+│         ▼   ▼                                              │
+│  ┌──────────────────────────────────────┐                  │
+│  │        Postgres (shared)             │                  │
+│  │  Phoenix writes via Ecto/Postgrex    │                  │
+│  │  Django writes via psycopg           │                  │
+│  └──────────────────────────────────────┘                  │
+└────────────────────────────────────────────────────────────┘
 ```
 
-**Phoenix** (port 4000) serves the landing page and JSON API endpoints for notes and shared ETS state.
+**Single port (4000).** A single cowboy listener fronts everything. Its dispatch table routes `/django/*` to `hornbeam_handler` (the WSGI bridge) and everything else to the Phoenix endpoint via `Plug.Cowboy.Handler`.
 
-**hornbeam** (port 8001) runs the Django WSGI app inside the BEAM. Django views import `hornbeam_erlang` for ETS state operations and the `erlang` module to call registered Elixir functions — no network calls, just NIF function calls.
+**`HornbeamServer`** brings up the Python runtime, registers Elixir callbacks, and patches the endpoint config with the merged dispatch before the endpoint child starts. It calls `:hornbeam.start/2` with `bind: "127.0.0.1:0"` and immediately runs `:ranch.stop_listener(:hornbeam_http)` — hornbeam normally insists on its own listener, but we throw it away and reuse Phoenix's cowboy. Order in `application.ex` matters: HornbeamServer must come before `HoringboomWeb.Endpoint`.
 
-**Postgres** is shared between both runtimes. Phoenix uses Ecto/Postgrex and Django uses psycopg to read and write the same `notes` table.
-
-The `HornbeamServer` GenServer starts hornbeam in the Phoenix supervision tree, activates the Django venv, and registers Elixir functions that Django can call.
+**Postgres** is shared. Phoenix uses Ecto/Postgrex, Django uses psycopg, and they read/write the same `notes` table.
 
 ## Endpoints
 
@@ -54,15 +59,15 @@ The `HornbeamServer` GenServer starts hornbeam in the Phoenix supervision tree, 
 | `POST http://localhost:4000/api/notes` | Create a note from Phoenix (source="phoenix") |
 | `http://localhost:4000/api/state` | Read all shared ETS state from Phoenix |
 | `PUT http://localhost:4000/api/state/:key` | Write a shared ETS key from Phoenix |
-| `http://localhost:8001/django/notes/` | List notes from Django (psycopg) |
-| `POST http://localhost:8001/django/notes/` | Create a note from Django (source="django") |
-| `http://localhost:8001/django/` | Page-view counter using `hornbeam_erlang.state_incr` (ETS) |
-| `http://localhost:8001/django/shared-state/` | Read/write shared ETS state from Python |
-| `http://localhost:8001/django/call-elixir/` | Call registered Elixir functions from Python (pass `?name=Yourname`) |
-| `http://localhost:8001/django/info/` | Python runtime info |
-| `GET http://localhost:8001/django/ecto-notes/` | List notes via Django ORM routed through Ecto's Postgrex pool (proof-of-concept) |
-| `POST http://localhost:8001/django/ecto-notes/` | Create note via Django ORM routed through Ecto |
-| `POST http://localhost:8001/django/ecto-tx-demo/?action=commit\|raise` | Two inserts in `transaction.atomic(using='ecto')`; commit persists both, raise rolls back both |
+| `http://localhost:4000/django/notes/` | List notes from Django (psycopg) |
+| `POST http://localhost:4000/django/notes/` | Create a note from Django (source="django") |
+| `http://localhost:4000/django/` | Page-view counter using `hornbeam_erlang.state_incr` (ETS) |
+| `http://localhost:4000/django/shared-state/` | Read/write shared ETS state from Python |
+| `http://localhost:4000/django/call-elixir/` | Call registered Elixir functions from Python (pass `?name=Yourname`) |
+| `http://localhost:4000/django/info/` | Python runtime info |
+| `GET http://localhost:4000/django/ecto-notes/` | List notes via Django ORM routed through Ecto's Postgrex pool (proof-of-concept) |
+| `POST http://localhost:4000/django/ecto-notes/` | Create note via Django ORM routed through Ecto |
+| `POST http://localhost:4000/django/ecto-tx-demo/?action=commit\|raise` | Two inserts in `transaction.atomic(using='ecto')`; commit persists both, raise rolls back both |
 
 ## Prerequisites
 
@@ -117,7 +122,7 @@ PYTHONHOME=$(uv python find 3.14 | sed 's|/bin/python3.14||') PYTHON_THREAD_STAC
 Then open:
 
 - [http://localhost:4000](http://localhost:4000) — Phoenix
-- [http://localhost:8001/django/](http://localhost:8001/django/) — Django via hornbeam
+- [http://localhost:4000/django/](http://localhost:4000/django/) — Django via hornbeam (same listener)
 
 Try the shared database:
 
@@ -126,31 +131,36 @@ Try the shared database:
 curl -X POST http://localhost:4000/api/notes -H 'Content-Type: application/json' -d '{"title": "From Phoenix"}'
 
 # Create a note from Django
-curl -X POST http://localhost:8001/django/notes/ -H 'Content-Type: application/json' -d '{"title": "From Django"}'
+curl -X POST http://localhost:4000/django/notes/ -H 'Content-Type: application/json' -d '{"title": "From Django"}'
 
 # Both show up in either runtime
 curl http://localhost:4000/api/notes
-curl http://localhost:8001/django/notes/
+curl http://localhost:4000/django/notes/
 ```
 
 ## Testing
 
-Unit tests (Phoenix controllers, Ecto schemas, contexts):
+Unit tests (Phoenix controllers, Ecto schemas, contexts) — fast, no Python boot:
 
 ```sh
+PYTHONHOME=$(uv python find 3.14 | sed 's|/bin/python3.14||') \
+PYTHON_THREAD_STACK_SIZE=16777216 \
 mix test
 ```
 
-Integration tests boot Django via hornbeam and make real HTTP calls. They require `PYTHONHOME`, `PYTHON_THREAD_STACK_SIZE`, and `DATABASE_NAME` so Django's psycopg connects to the test database:
+`PYTHONHOME` is needed even for unit tests because the `erlang_python` OTP application (a dep of hornbeam) starts unconditionally and the embedded interpreter needs to find its stdlib.
+
+Integration tests boot Django via hornbeam, bring up Phoenix's real cowboy listener on the test port (4002), and make real HTTP calls through the single shared dispatch — the same path the dev/prod app uses. They run **on their own** (not interleaved with unit tests) because Django's psycopg bypasses the Ecto sandbox and the suite TRUNCATEs the shared `notes` table:
 
 ```sh
+INTEGRATION=true \
 DATABASE_NAME=horingboom_test \
 PYTHONHOME=$(uv python find 3.14 | sed 's|/bin/python3.14||') \
 PYTHON_THREAD_STACK_SIZE=33554432 \
-mix test --include integration
+mix test
 ```
 
-Integration tests are excluded by default (`@moduletag :integration`) and run serially. The `setup` callback truncates shared tables between tests since Django's psycopg bypasses the Ecto sandbox.
+`INTEGRATION=true` flips `test_helper.exs` to include only `@moduletag :integration` tests and enables both `start_hornbeam` and the endpoint's `server` flag in `config/test.exs`. Without it, `mix test` runs only unit tests and skips integration.
 
 CI runs both suites via GitHub Actions (`.github/workflows/ci.yml`).
 
@@ -261,7 +271,7 @@ horingboom/
 | Layer | Technology | Version |
 |---|---|---|
 | VM | Erlang/OTP | 28 |
-| Web (Elixir) | Phoenix | 1.8.4 |
+| Web (Elixir) | Phoenix + plug_cowboy | 1.8.4 / 2.7 |
 | Database (Elixir) | Ecto + Postgrex | 3.13 |
 | Bridge | hornbeam | main (post-1.4.1) |
 | NIF | erlang_python | 3.1.1 |

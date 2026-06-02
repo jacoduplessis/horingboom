@@ -82,4 +82,6 @@ jobs:
         run: mix test
 
       - name: Run integration tests
-        run: mix test --include integration
+        run: mix test
+        env:
+          INTEGRATION: "true"

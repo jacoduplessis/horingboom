@@ -14,7 +14,7 @@ config :horingboom,
 # Configure the endpoint
 config :horingboom, HoringboomWeb.Endpoint,
   url: [host: "localhost"],
-  adapter: Bandit.PhoenixAdapter,
+  adapter: Phoenix.Endpoint.Cowboy2Adapter,
   render_errors: [
     formats: [html: HoringboomWeb.ErrorHTML, json: HoringboomWeb.ErrorJSON],
     layout: false

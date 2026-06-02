@@ -62,7 +62,7 @@ defmodule Horingboom.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:ecto_sql, "~> 3.12"},
       {:postgrex, ">= 0.0.0"},
-      {:bandit, "~> 1.5"},
+      {:plug_cowboy, "~> 2.7"},
       {:hornbeam, github: "benoitc/hornbeam", branch: "main", override: true},
       {:erlang_python, "~> 3.1", override: true}
     ]
