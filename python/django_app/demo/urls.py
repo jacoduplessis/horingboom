@@ -8,4 +8,6 @@ urlpatterns = [
     path("django/call-elixir/", views.call_elixir, name="call_elixir"),
     path("django/info/", views.info, name="info"),
     path("django/notes/", views.notes, name="notes"),
+    path("django/ecto-notes/", views.ecto_notes, name="ecto_notes"),
+    path("django/ecto-tx-demo/", views.ecto_tx_demo, name="ecto_tx_demo"),
 ]

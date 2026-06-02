@@ -1,7 +1,7 @@
 import json
 import sys
-import platform
 
+from django.db import transaction
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -55,13 +55,132 @@ def call_elixir(request):
 
 
 def info(request):
-    """Show execution mode and system info."""
+    """Show execution mode and system info.
+
+    erlang_python 3.x sandboxes subprocess.Popen (fork() would corrupt the
+    Erlang VM), so we read platform info from sys.* attributes instead of
+    platform.platform() / platform.python_implementation().
+    """
     return JsonResponse({
         "message": "Python runtime info inside hornbeam",
         "python_version": sys.version,
-        "platform": platform.platform(),
-        "implementation": platform.python_implementation(),
+        "platform": sys.platform,
+        "implementation": sys.implementation.name,
         "executable": sys.executable,
+    })
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+def ecto_notes(request):
+    """Same as notes(), but routed through the hornbeam_ecto backend.
+
+    Demonstrates Django's ORM driving Ecto's Postgrex connection pool via the
+    NIF instead of psycopg.
+    """
+    if request.method == "GET":
+        qs = Note.objects.using("ecto").all()
+        # Demo: WHERE binding via the proxied cursor when ?source=... is passed.
+        source_filter = request.GET.get("source")
+        if source_filter:
+            qs = qs.filter(source=source_filter)
+        all_notes = qs.order_by("-inserted_at")[:10]
+        return JsonResponse({
+            "via": "ecto",
+            "filter_source": source_filter,
+            "notes": [
+                {
+                    "id": n.id,
+                    "title": n.title,
+                    "body": n.body,
+                    "source": n.source,
+                    "inserted_at": n.inserted_at.isoformat() if n.inserted_at else None,
+                    "updated_at": n.updated_at.isoformat() if n.updated_at else None,
+                }
+                for n in all_notes
+            ]
+        })
+
+    data = json.loads(request.body)
+    note = Note.objects.using("ecto").create(
+        title=data["title"],
+        body=data.get("body", ""),
+        source="django-ecto",
+    )
+    return JsonResponse({
+        "via": "ecto",
+        "note": {
+            "id": note.id,
+            "title": note.title,
+            "body": note.body,
+            "source": note.source,
+            "inserted_at": note.inserted_at.isoformat() if note.inserted_at else None,
+            "updated_at": note.updated_at.isoformat() if note.updated_at else None,
+        }
+    }, status=201)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def ecto_tx_demo(request):
+    """Insert two notes inside `transaction.atomic(using='ecto')`.
+
+    ?action=commit  -> both rows persist
+    ?action=raise   -> raise inside the block; both inserts roll back
+
+    The Ecto-side worker holds the connection until commit/rollback, so the
+    second INSERT sees the first one's data within the same transaction.
+    """
+    action = request.GET.get("action", "commit")
+
+    titles_before = [
+        n.title
+        for n in Note.objects.using("ecto").filter(source="tx-demo").order_by("id")
+    ]
+
+    inserted = []
+    try:
+        with transaction.atomic(using="ecto"):
+            a = Note.objects.using("ecto").create(
+                title="tx-a", body="first", source="tx-demo"
+            )
+            inserted.append(a.id)
+
+            # Read-your-own-write: the second statement runs inside the same
+            # Ecto transaction worker, so it sees row `a` (and would see it
+            # even before commit since they share the connection).
+            seen_inside = list(
+                Note.objects.using("ecto")
+                .filter(source="tx-demo")
+                .values_list("title", flat=True)
+            )
+
+            b = Note.objects.using("ecto").create(
+                title="tx-b", body="second", source="tx-demo"
+            )
+            inserted.append(b.id)
+
+            if action == "raise":
+                raise RuntimeError("demo rollback")
+    except RuntimeError as e:
+        outcome = f"rolled back: {e}"
+    else:
+        outcome = "committed"
+        seen_inside = seen_inside  # populated above
+
+    titles_after = [
+        n.title
+        for n in Note.objects.using("ecto").filter(source="tx-demo").order_by("id")
+    ]
+
+    return JsonResponse({
+        "via": "ecto",
+        "action": action,
+        "outcome": outcome,
+        "inserted_ids": inserted,
+        "titles_before": titles_before,
+        "seen_inside_tx": seen_inside if action == "commit" else None,
+        "titles_after": titles_after,
     })
 
 

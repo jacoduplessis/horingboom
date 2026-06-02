@@ -83,7 +83,13 @@ DATABASES = {
         'PASSWORD': 'postgres',
         'HOST': 'localhost',
         'PORT': '5432',
-    }
+    },
+    # PoC: route queries through Ecto's Postgrex pool via the hornbeam NIF.
+    # See api/hornbeam_ecto/. No own connection — autocommit only.
+    'ecto': {
+        'ENGINE': 'api.hornbeam_ecto',
+        'NAME': '',
+    },
 }
 
 

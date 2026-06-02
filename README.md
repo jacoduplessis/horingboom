@@ -8,7 +8,7 @@ Hornbeam embeds a Python interpreter directly in the Erlang VM through a NIF, so
 
 ```
 ┌───────────────────────────────────────────────────────┐
-│                    BEAM VM (OTP 28)                    │
+│                    BEAM VM (OTP 28)                   │
 │                                                       │
 │  ┌─────────────┐          ┌────────────────────┐      │
 │  │   Phoenix   │          │     hornbeam       │      │
@@ -60,6 +60,9 @@ The `HornbeamServer` GenServer starts hornbeam in the Phoenix supervision tree, 
 | `http://localhost:8001/django/shared-state/` | Read/write shared ETS state from Python |
 | `http://localhost:8001/django/call-elixir/` | Call registered Elixir functions from Python (pass `?name=Yourname`) |
 | `http://localhost:8001/django/info/` | Python runtime info |
+| `GET http://localhost:8001/django/ecto-notes/` | List notes via Django ORM routed through Ecto's Postgrex pool (proof-of-concept) |
+| `POST http://localhost:8001/django/ecto-notes/` | Create note via Django ORM routed through Ecto |
+| `POST http://localhost:8001/django/ecto-tx-demo/?action=commit\|raise` | Two inserts in `transaction.atomic(using='ecto')`; commit persists both, raise rolls back both |
 
 ## Prerequisites
 
@@ -151,22 +154,56 @@ Integration tests are excluded by default (`@moduletag :integration`) and run se
 
 CI runs both suites via GitHub Actions (`.github/workflows/ci.yml`).
 
+## Proof of concept: Django ORM over Ecto
+
+`api/hornbeam_ecto/` is a custom Django database backend that ships SQL to Elixir
+via `erlang.call("ecto_query", sql, params)` instead of opening its own psycopg
+connection. The Elixir side (`Horingboom.HornbeamServer.ecto_query/2`) runs the
+SQL through `Ecto.Adapters.SQL.query/3`, so Django shares Phoenix's Postgrex
+connection pool.
+
+- `engine = 'api.hornbeam_ecto'` (registered as the `'ecto'` DB in `settings.py`)
+- The cursor converts `%s` placeholders to `$1`-style and tags non-primitive
+  param/result values (`datetime`, `date`, `time`, `decimal`) as
+  `{"__type__": ..., "value": ...}` so they survive the erlang_python boundary
+- Use it: `Note.objects.using("ecto").all()`, `.filter(...)`, `.create(...)`
+- The `/django/ecto-notes/` endpoint exercises both SELECT (with WHERE
+  binding via `?source=...`) and INSERT...RETURNING
+
+**Transactions** are supported via a long-lived worker process. Ecto's own
+transactions rely on `DBConnection` stashing the checked-out connection in
+the **process dictionary**, so any query from that same Erlang process
+inside `Repo.transaction/1` reuses the bound connection. To extend that
+across the NIF boundary, `ecto_tx_begin` spawns a worker that parks itself
+inside `Horingboom.Repo.transaction(fn -> tx_loop() end)` and processes
+`{:query, ...}` / `{:commit, ...}` / `{:rollback, ...}` messages. Every
+query runs in that worker, so they all share the bound connection. The
+worker exits normally on commit and calls `Repo.rollback/1` on rollback or
+idle timeout (60s).
+
+Django wiring: `_set_autocommit(False)` (called by `transaction.atomic` on
+enter) calls `ecto_tx_begin` and stores the `tx_id` on the connection;
+`commit()` / `rollback()` (called on exit) tear it down. While `tx_id` is
+set, `cursor.execute` routes through `ecto_tx_query` instead of
+`ecto_query`. `transaction.atomic(using='ecto')` just works — see
+`/django/ecto-tx-demo/`.
+
+**Remaining limits.** No savepoints, so nested `transaction.atomic()` will
+fail. Type marshalling is minimal (datetime/date/time/decimal tagged maps
+plus primitives). `cursor.description` doesn't carry real PG type codes —
+fine for the ORM but breaks anything that inspects type OIDs. Subclassing
+the PG backend means we still depend on psycopg being installed (Django
+imports it eagerly to pick up adapter maps).
+
 ## Workarounds
 
 **`PYTHONHOME` required at startup.** The erlang_python NIF calls `Py_InitializeFromConfig` with a default `PyConfig` that doesn't set `home`. Since the host process is `beam.smp` (not a Python executable), the interpreter can't locate its standard library without `PYTHONHOME` in the environment. This must be set before the BEAM starts — setting it in `config/runtime.exs` is too late because `erlang_python` loads as a dependency before the app boots.
 
 **`PYTHON_THREAD_STACK_SIZE` needed for CPython 3.14.** BEAM scheduler threads have smaller stacks than Python expects. Without this, the embedded interpreter hits "Unrecoverable stack overflow" during Django initialization. Use 16MB (`16777216`) for development and 32MB (`33554432`) for tests.
 
-**`hornbeam_erlang.call()` not wired up.** The Python-side `hornbeam_erlang.call(name)` routes through a `hornbeam_callbacks` bridge function that isn't registered as a py_callback. The `hornbeam_erlang.state_keys()` function has the same issue. Use the `erlang` module directly to call registered functions, and avoid `state_keys()`:
+**`subprocess.Popen` is sandboxed.** erlang_python 3.x installs a PEP 578 audit hook that blocks `subprocess.Popen`, `os.system`, `os.popen`, `os.fork`, and `os.exec*`/`os.spawn*` — fork/exec would corrupt the BEAM runtime. Avoid `platform.platform()` and `platform.python_implementation()` (they shell out to `uname`); read `sys.platform` and `sys.implementation.name` instead.
 
-```python
-# Instead of: from hornbeam_erlang import call
-import erlang
-result = erlang.call("my_function", arg1, arg2)
-
-# State operations that DO work via hornbeam_erlang:
-from hornbeam_erlang import state_get, state_set, state_incr, state_decr, state_delete
-```
+**`empty` atom workaround in `hornbeam_wsgi_worker.py`.** With erlang_python 3.x, atoms surface to Python as `str` rather than `bytes`/`Atom`. Hornbeam's master-branch WSGI worker only compares the body-marker against `b'empty'`, so bodyless requests fail with `'str' object has no attribute 'read'`. We patch `deps/hornbeam/priv/hornbeam_wsgi_worker.py` in `_create_environ_from_tuple` to also accept `'empty'` (str). Re-apply after `mix deps.update hornbeam`.
 
 ## Project structure
 
@@ -226,8 +263,8 @@ horingboom/
 | VM | Erlang/OTP | 28 |
 | Web (Elixir) | Phoenix | 1.8.4 |
 | Database (Elixir) | Ecto + Postgrex | 3.13 |
-| Bridge | hornbeam | 1.4.1 |
-| NIF | erlang_python | 1.8.1 |
+| Bridge | hornbeam | main (post-1.4.1) |
+| NIF | erlang_python | 3.1.1 |
 | Web (Python) | Django | 6.0.2 |
 | Database (Python) | psycopg | 3.3 |
 | Python runtime | CPython | 3.14.0 |

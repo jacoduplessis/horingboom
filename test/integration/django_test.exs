@@ -19,7 +19,7 @@ defmodule Horingboom.Integration.DjangoTest do
 
       assert body["message"] =~ "Python runtime info"
       assert body["python_version"] =~ "3.14"
-      assert body["implementation"] == "CPython"
+      assert body["implementation"] == "cpython"
       assert body["platform"]
     end
 
