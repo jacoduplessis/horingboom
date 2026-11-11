@@ -19,7 +19,7 @@ defmodule Horingboom.IntegrationCase do
   use ExUnit.CaseTemplate
 
   # Matches config/test.exs.
-  @port 4002
+  @port 4012
 
   using do
     quote do

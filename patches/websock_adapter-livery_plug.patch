@@ -1,0 +1,11 @@
+--- a/deps/websock_adapter/lib/websock_adapter.ex
++++ b/deps/websock_adapter/lib/websock_adapter.ex
+@@ -99,6 +99,8 @@
+   end
+ 
+   defp tuple_for(Plug.Adapters.Test.Conn, websock, state, opts), do: {websock, state, opts}
++  # Prototype patch (livery-adapter worktree): LiveryPlug takes Bandit's shape.
++  defp tuple_for(LiveryPlug.Conn, websock, state, opts), do: {websock, state, opts}
+ 
+   defp tuple_for(adapter, _websock, _state, _opts),
+     do: raise(ArgumentError, "Unknown adapter #{inspect(adapter)}")

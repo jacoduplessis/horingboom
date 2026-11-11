@@ -22,7 +22,7 @@ integration? = System.get_env("INTEGRATION") == "true"
 config :horingboom, start_hornbeam: integration?
 
 config :horingboom, HoringboomWeb.Endpoint,
-  http: [ip: {127, 0, 0, 1}, port: 4002],
+  http: [ip: {127, 0, 0, 1}, port: 4012],
   secret_key_base: "ULijfrlDzBKVtDsApA/RJWkzDP2TaU3KZgaYQLZnAuyhO3uuU04co3oc93Hq1/Xm",
   server: integration?
 

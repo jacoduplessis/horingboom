@@ -29,4 +29,14 @@ defmodule HoringboomWeb.Router do
     get "/state", StateController, :index
     put "/state/:key", StateController, :update
   end
+
+  # Livery adapter probes (prototype only).
+  scope "/probe", HoringboomWeb do
+    get "/chunked", ProbeController, :chunked
+    post "/echo", ProbeController, :echo_body
+    get "/file", ProbeController, :file
+    get "/inform", ProbeController, :inform
+    get "/peer", ProbeController, :peer
+    get "/boom", ProbeController, :boom
+  end
 end

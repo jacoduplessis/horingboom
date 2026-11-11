@@ -7,4 +7,5 @@ if System.get_env("INTEGRATION") == "true" do
 else
   ExUnit.start(exclude: [:integration])
 end
+
 Ecto.Adapters.SQL.Sandbox.mode(Horingboom.Repo, :manual)

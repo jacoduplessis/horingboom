@@ -1,0 +1,11 @@
+--- a/deps/hornbeam/priv/hornbeam_wsgi_worker.py
++++ b/deps/hornbeam/priv/hornbeam_wsgi_worker.py
+@@ -416,7 +416,7 @@
+     environ['wsgi.errors'] = _SHARED_ERRORS
+ 
+     # Use buffer as wsgi.input, or empty BytesIO for bodyless requests
+-    if buffer == b'empty' or (hasattr(buffer, '__class__') and buffer.__class__.__name__ == 'Atom'):
++    if buffer == 'empty' or buffer == b'empty' or (hasattr(buffer, '__class__') and buffer.__class__.__name__ == 'Atom'):
+         environ['wsgi.input'] = io.BytesIO()
+     else:
+         environ['wsgi.input'] = buffer

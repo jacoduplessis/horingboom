@@ -4,6 +4,32 @@ A proof-of-concept running an Elixir/Phoenix app alongside a Python/Django app o
 
 Hornbeam embeds a Python interpreter directly in the Erlang VM through a NIF, so there's no HTTP overhead or serialization boundary between the two runtimes. Django views can read and write ETS tables, call registered Elixir functions, and use pub/sub — all in-process.
 
+> **Branch `livery-adapter`: prototype, not merged.** Here livery (hornbeam's
+> HTTP server) serves Phoenix too, through `LiveryPlug.PhoenixAdapter` in
+> `lib/livery_plug/`, and `/django/*` is a livery route to `hornbeam_handler`.
+> `main` takes the other route: Phoenix on Bandit, Django through
+> `HoringboomWeb.DjangoPlug`. The rest of this README still describes the
+> cowboy setup this branch started from.
+>
+> After `mix deps.get`, apply the two deps patches and recompile:
+>
+> ```sh
+> git apply patches/*.patch
+> mix deps.compile websock_adapter --force
+> ```
+>
+> - `websock_adapter-livery_plug.patch`: websock_adapter rejects adapters it
+>   doesn't know, so LiveView's socket needs `LiveryPlug.Conn` added.
+> - `hornbeam-empty-marker.patch`: hornbeam marks bodyless requests with the
+>   atom `empty`, which erlang_python 5 hands Python as a `str`; the worker
+>   only checks `b'empty'`.
+>
+> Known gaps: HTTP only (no TLS, HTTP/2 or HTTP/3); the raw path is lost
+> (`%2F` arrives as `/`); `get_sock_data` is a stub; the WebSocket close code
+> can't be set; livery stays at 0.9.2, which still starts barrel_mcp. The
+> Django route buffers request bodies itself, because hornbeam's handler hangs
+> for 30 s on bodies of 64 KB or more. Integration tests use port 4012.
+
 ## How it works
 
 ```

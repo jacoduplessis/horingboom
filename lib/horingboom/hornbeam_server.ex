@@ -28,17 +28,18 @@ defmodule Horingboom.HornbeamServer do
       end
 
     # Hornbeam always binds an HTTP listener. We don't want a second port —
-    # bind ephemerally and shut the listener down. Python runtime, worker pool,
-    # lifespan state, and registered callbacks stay alive.
-    :hornbeam.start("demo.wsgi:application", %{
-      bind: "127.0.0.1:0",
-      num_contexts: num_contexts,
-      worker_class: :wsgi,
-      venv: venv_path,
-      pythonpath: [django_path]
-    })
+    # bind ephemerally and shut the listener down. Python runtime, context
+    # pool, lifespan state, and registered callbacks stay alive.
+    :ok =
+      :hornbeam.start("demo.wsgi:application", %{
+        bind: "127.0.0.1:0",
+        num_contexts: num_contexts,
+        worker_class: :wsgi,
+        venv: venv_path,
+        pythonpath: [django_path]
+      })
 
-    :ranch.stop_listener(:hornbeam_http)
+    :ok = :hornbeam_listener.stop_service()
 
     :hornbeam.register_function("system_info", fn _args ->
       %{
@@ -80,35 +81,59 @@ defmodule Horingboom.HornbeamServer do
     {:ok, %{}}
   end
 
-  # Phoenix's Cowboy2Adapter reads :http from endpoint config and supports a
-  # :dispatch override (see deps/phoenix/lib/phoenix/endpoint/cowboy2_adapter.ex
-  # docstring). Patching the endpoint config here, before the endpoint child
-  # starts, gives us a single cowboy listener with /django/* routed to hornbeam
-  # and everything else through Phoenix.
+  # LiveryPlug.PhoenixAdapter serves the endpoint over livery and takes extra
+  # livery routes ahead of Phoenix. Patching the endpoint config here, before
+  # the endpoint child starts, puts /django/* on hornbeam's own livery handler.
   defp inject_django_dispatch do
-    # Mirrors the map hornbeam builds internally at
-    # deps/hornbeam/src/hornbeam.erl:659-665 for its catchall handler. Not a
-    # public API — if upstream adds fields, Django requests will start failing.
+    config = :hornbeam_config.get_config()
+    endpoint_config = Application.get_env(:horingboom, HoringboomWeb.Endpoint, [])
+    http_config = Keyword.get(endpoint_config, :http, [])
+
+    # Mirrors the handler state hornbeam builds in start_listener/1 and
+    # listener_state/3 (deps/hornbeam/src/hornbeam.erl). Not a public API.
     django_state = %{
-      worker_class: :wsgi,
-      app_module: "demo.wsgi",
-      app_callable: "application",
-      timeout: 30_000,
-      lifespan_state: :hornbeam_lifespan.get_state()
+      worker_class: config.worker_class,
+      app_module: config.app_module,
+      app_callable: config.app_callable,
+      timeout: config.timeout,
+      lifespan_state: :hornbeam_lifespan.get_state(),
+      server_scheme: "http",
+      server_port: Keyword.get(http_config, :port)
     }
 
-    dispatch = [
-      {:_,
-       [
-         {"/django/[...]", :hornbeam_handler, django_state},
-         {:_, Plug.Cowboy.Handler, {HoringboomWeb.Endpoint, []}}
-       ]}
-    ]
+    django = &__MODULE__.serve_django/1
 
-    endpoint_config = Application.get_env(:horingboom, HoringboomWeb.Endpoint, [])
-    http_config = Keyword.get(endpoint_config, :http, []) |> Keyword.put(:dispatch, dispatch)
-    updated = Keyword.put(endpoint_config, :http, http_config)
-    Application.put_env(:horingboom, HoringboomWeb.Endpoint, updated)
+    http_config =
+      http_config
+      |> Keyword.put(:livery_routes, [{:_, "/django", django}, {:_, "/django/*rest", django}])
+      |> Keyword.put(:livery_config, django_state)
+
+    Application.put_env(
+      :horingboom,
+      HoringboomWeb.Endpoint,
+      Keyword.put(endpoint_config, :http, http_config)
+    )
+  end
+
+  # hornbeam_handler streams bodies >= 64 KB into the py_buffer from its
+  # receive loop, but only after py_nif:context_call returns — and Python is
+  # already blocked reading that buffer inside the call, so the request hangs
+  # until the 30 s timeout. A buffered body takes its inline path instead.
+  @doc false
+  def serve_django(req) do
+    case :livery_req.body(req) do
+      {:stream, reader} ->
+        case :livery_body.read_all(reader, 15_000, :infinity) do
+          {:ok, body, _reader} ->
+            :hornbeam_handler.handle(:livery_req.set_body({:buffered, body}, req))
+
+          {:error, reason, _reader} ->
+            :livery_resp.text(400, "bad request body: #{inspect(reason)}")
+        end
+
+      _ ->
+        :hornbeam_handler.handle(req)
+    end
   end
 
   # Bridge: run SQL through Horingboom.Repo so Django's ORM can share Ecto's
@@ -147,14 +172,18 @@ defmodule Horingboom.HornbeamServer do
   defp decode_param(%{"__type__" => "decimal", "value" => s}), do: Decimal.new(s)
   defp decode_param(v), do: v
 
-  defp encode_value(%DateTime{} = v), do: %{"__type__" => "datetime", "value" => DateTime.to_iso8601(v)}
+  defp encode_value(%DateTime{} = v),
+    do: %{"__type__" => "datetime", "value" => DateTime.to_iso8601(v)}
 
   defp encode_value(%NaiveDateTime{} = v),
     do: %{"__type__" => "datetime", "value" => NaiveDateTime.to_iso8601(v)}
 
   defp encode_value(%Date{} = v), do: %{"__type__" => "date", "value" => Date.to_iso8601(v)}
   defp encode_value(%Time{} = v), do: %{"__type__" => "time", "value" => Time.to_iso8601(v)}
-  defp encode_value(%Decimal{} = v), do: %{"__type__" => "decimal", "value" => Decimal.to_string(v)}
+
+  defp encode_value(%Decimal{} = v),
+    do: %{"__type__" => "decimal", "value" => Decimal.to_string(v)}
+
   defp encode_value(v), do: v
 
   # Wrap each row as a tuple. A pure list of small integers gets optimized to
