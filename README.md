@@ -11,15 +11,15 @@ Hornbeam embeds a Python interpreter directly in the Erlang VM through a NIF, so
 │                     BEAM VM (OTP 28)                       │
 │                                                            │
 │              ┌──────────────────────────┐                  │
-│         ┌──▶ │   cowboy :4000           │ ◀──┐             │
-│         │    │   single dispatch table  │    │             │
+│         ┌──▶ │   Bandit :4000           │ ◀──┐             │
+│         │    │   Phoenix endpoint plugs │    │             │
 │         │    └──────────┬───────────────┘    │             │
-│         │               │ /django/[...]      │             │
-│         │  catchall ┌───┴───┐                │             │
+│         │               │ /django/*          │             │
+│         │    router ┌───┴───┐                │             │
 │         │           ▼       ▼                │             │
 │  ┌──────┴──────┐  ┌──────────────────┐       │             │
-│  │   Phoenix   │  │ hornbeam_handler │       │             │
-│  │  endpoint   │  │ (WSGI bridge)    │       │             │
+│  │   Phoenix   │  │ DjangoPlug       │       │             │
+│  │   router    │  │ (WSGI bridge)    │       │             │
 │  │             │  │      │           │       │             │
 │  │  Ecto +     │  │ Django WSGI app  │       │             │
 │  │  Postgrex   │  │ via erlang_python│       │             │
@@ -44,9 +44,11 @@ Hornbeam embeds a Python interpreter directly in the Erlang VM through a NIF, so
 └────────────────────────────────────────────────────────────┘
 ```
 
-**Single port (4000).** A single cowboy listener fronts everything. Its dispatch table routes `/django/*` to `hornbeam_handler` (the WSGI bridge) and everything else to the Phoenix endpoint via `Plug.Cowboy.Handler`.
+**Single port (4000).** Phoenix's Bandit listener fronts everything. `HoringboomWeb.DjangoPlug` sits in the endpoint just before `Plug.Parsers` (Django needs the raw body), serves `/django/*` from Django, and passes everything else on to the Phoenix router. Django requests get Phoenix's request id and telemetry on the way.
 
-**`HornbeamServer`** brings up the Python runtime, registers Elixir callbacks, and patches the endpoint config with the merged dispatch before the endpoint child starts. It calls `:hornbeam.start/2` with `bind: "127.0.0.1:0"` and immediately runs `:ranch.stop_listener(:hornbeam_http)` — hornbeam normally insists on its own listener, but we throw it away and reuse Phoenix's cowboy. Order in `application.ex` matters: HornbeamServer must come before `HoringboomWeb.Endpoint`.
+**`DjangoPlug`** does what hornbeam's own `hornbeam_handler` does, starting from a `Plug.Conn`. It reads the body into a `py_buffer`, builds the request tuple of `hornbeam_request:build_wsgi_tuple/2`, calls `hornbeam_wsgi_worker.handle_request_tuple`, and turns the messages Python sends back into `send_resp` or `send_chunked`. That protocol is internal to hornbeam, which is why `mix.exs` pins hornbeam by commit: re-check it before bumping.
+
+**`HornbeamServer`** brings up the Python runtime and registers Elixir callbacks. It calls `:hornbeam.start/2` with `bind: "127.0.0.1:0"` and immediately runs `:hornbeam_listener.stop_service/0` — hornbeam always starts its own (livery) listener, but we throw it away. On shutdown it calls `:hornbeam.stop/0`. Order in `application.ex` matters: HornbeamServer must come before `HoringboomWeb.Endpoint` so Python is up before requests arrive.
 
 **Postgres** is shared. Phoenix uses Ecto/Postgrex, Django uses psycopg, and they read/write the same `notes` table.
 
@@ -65,6 +67,7 @@ Hornbeam embeds a Python interpreter directly in the Erlang VM through a NIF, so
 | `http://localhost:4000/django/shared-state/` | Read/write shared ETS state from Python |
 | `http://localhost:4000/django/call-elixir/` | Call registered Elixir functions from Python (pass `?name=Yourname`) |
 | `http://localhost:4000/django/info/` | Python runtime info |
+| `http://localhost:4000/django/stream/` | `StreamingHttpResponse`, sent by Phoenix as a chunked response |
 | `GET http://localhost:4000/django/ecto-notes/` | List notes via Django ORM routed through Ecto's Postgrex pool (proof-of-concept) |
 | `POST http://localhost:4000/django/ecto-notes/` | Create note via Django ORM routed through Ecto |
 | `POST http://localhost:4000/django/ecto-tx-demo/?action=commit\|raise` | Two inserts in `transaction.atomic(using='ecto')`; commit persists both, raise rolls back both |
@@ -86,23 +89,17 @@ uv python install 3.14
 cd python/django_app && uv sync && cd ../..
 ```
 
-Fetch Elixir dependencies and compile:
+Fetch Elixir dependencies and compile. The erlang_python NIF must be built against the same Python 3.14 that `PYTHONHOME` points at below; `PYTHON_CONFIG` tells its CMake which one:
 
 ```sh
-mix setup
+PYTHON_CONFIG="$(uv python find 3.14)-config" mix setup
 ```
 
-The erlang_python NIF must be compiled against Python 3.14. If cmake picks up the wrong Python (check the cmake output for `Python3 version`), rebuild it manually:
+If cmake still picked up the wrong Python (check the cmake output for `Python3 version`), clear its cache and rebuild just the NIF:
 
 ```sh
-cd deps/erlang_python && rm -rf _build/cmake && mkdir -p _build/cmake && cd _build/cmake
-PYTHON_ROOT=$(uv python find 3.14 | sed 's|/bin/python3.14||')
-cmake ../../c_src \
-  -DPython3_EXECUTABLE="$PYTHON_ROOT/bin/python3.14" \
-  -DPython3_INCLUDE_DIR="$PYTHON_ROOT/include/python3.14" \
-  -DPython3_LIBRARY="$PYTHON_ROOT/lib/libpython3.14.dylib"
-cmake --build .
-cd ../../../..
+rm -rf deps/erlang_python/_build/cmake
+PYTHON_CONFIG="$(uv python find 3.14)-config" mix deps.compile erlang_python --force
 ```
 
 Create the database and run migrations:
@@ -150,7 +147,7 @@ mix test
 
 `PYTHONHOME` is needed even for unit tests because the `erlang_python` OTP application (a dep of hornbeam) starts unconditionally and the embedded interpreter needs to find its stdlib.
 
-Integration tests boot Django via hornbeam, bring up Phoenix's real cowboy listener on the test port (4002), and make real HTTP calls through the single shared dispatch — the same path the dev/prod app uses. They run **on their own** (not interleaved with unit tests) because Django's psycopg bypasses the Ecto sandbox and the suite TRUNCATEs the shared `notes` table:
+Integration tests boot Django via hornbeam, bring up Phoenix's real Bandit listener on the test port (4002), and make real HTTP calls through it — the same path the dev/prod app uses. They run **on their own** (not interleaved with unit tests) because Django's psycopg bypasses the Ecto sandbox and the suite TRUNCATEs the shared `notes` table:
 
 ```sh
 INTEGRATION=true \
@@ -211,9 +208,9 @@ imports it eagerly to pick up adapter maps).
 
 **`PYTHON_THREAD_STACK_SIZE` needed for CPython 3.14.** BEAM scheduler threads have smaller stacks than Python expects. Without this, the embedded interpreter hits "Unrecoverable stack overflow" during Django initialization. Use 16MB (`16777216`) for development and 32MB (`33554432`) for tests.
 
-**`subprocess.Popen` is sandboxed.** erlang_python 3.x installs a PEP 578 audit hook that blocks `subprocess.Popen`, `os.system`, `os.popen`, `os.fork`, and `os.exec*`/`os.spawn*` — fork/exec would corrupt the BEAM runtime. Avoid `platform.platform()` and `platform.python_implementation()` (they shell out to `uname`); read `sys.platform` and `sys.implementation.name` instead.
+**`subprocess.Popen` is sandboxed.** erlang_python (3.x and later) installs a PEP 578 audit hook that blocks `subprocess.Popen`, `os.system`, `os.popen`, `os.fork`, and `os.exec*`/`os.spawn*` — fork/exec would corrupt the BEAM runtime. Avoid `platform.platform()` and `platform.python_implementation()` (they shell out to `uname`); read `sys.platform` and `sys.implementation.name` instead.
 
-**`empty` atom workaround in `hornbeam_wsgi_worker.py`.** With erlang_python 3.x, atoms surface to Python as `str` rather than `bytes`/`Atom`. Hornbeam's master-branch WSGI worker only compares the body-marker against `b'empty'`, so bodyless requests fail with `'str' object has no attribute 'read'`. We patch `deps/hornbeam/priv/hornbeam_wsgi_worker.py` in `_create_environ_from_tuple` to also accept `'empty'` (str). Re-apply after `mix deps.update hornbeam`.
+**Bodyless requests still get a `py_buffer`.** Hornbeam marks bodyless requests with the atom `empty`, but erlang_python (3.x and later) hands atoms to Python as `str`, and hornbeam's WSGI worker only recognises `b'empty'` — so Django would get the string as `wsgi.input`. `DjangoPlug` always passes a closed (possibly empty) buffer instead, so `deps/hornbeam` needs no patch.
 
 ## Project structure
 
@@ -236,6 +233,8 @@ horingboom/
 │   │   └── notes/
 │   │       └── note.ex         # Ecto schema
 │   └── horingboom_web/
+│       ├── endpoint.ex         # Plug pipeline; DjangoPlug before Plug.Parsers
+│       ├── django_plug.ex      # Serves /django/* through hornbeam's WSGI worker
 │       ├── router.ex           # /api/notes, /api/state routes
 │       └── controllers/
 │           ├── notes_controller.ex  # Notes JSON API
@@ -261,6 +260,7 @@ horingboom/
 │   │   └── integration_case.ex # Boots HornbeamServer, truncates between tests
 │   ├── integration/
 │   │   ├── django_test.exs     # Django endpoint tests (HTTP via Req)
+│   │   ├── django_plug_test.exs    # WSGI bridge: paths, bodies, headers, streaming
 │   │   └── cross_runtime_test.exs  # Cross-runtime ETS + Postgres tests
 │   └── horingboom/             # Unit tests (schemas, contexts, controllers)
 └── mix.exs                     # hornbeam, ecto_sql, postgrex deps
@@ -271,12 +271,13 @@ horingboom/
 | Layer | Technology | Version |
 |---|---|---|
 | VM | Erlang/OTP | 28 |
-| Web (Elixir) | Phoenix + plug_cowboy | 1.8.4 / 2.7 |
+| Web (Elixir) | Phoenix + Bandit | 1.8.4 / 1.12 |
 | Database (Elixir) | Ecto + Postgrex | 3.13 |
-| Bridge | hornbeam | main (post-1.4.1) |
-| NIF | erlang_python | 3.1.1 |
+| Bridge | hornbeam | main @ `19f8993` (unreleased, post-1.4.1) |
+| HTTP (hornbeam's, stopped at boot) | livery | 0.12.1 |
+| NIF | erlang_python | 5.0.1 |
 | Web (Python) | Django | 6.0.2 |
 | Database (Python) | psycopg | 3.3 |
-| Python runtime | CPython | 3.14.0 |
+| Python runtime | CPython | 3.14 (3.14.10 at time of writing) |
 | Python tooling | uv | 0.9.7 |
 | Database | PostgreSQL | 17 |

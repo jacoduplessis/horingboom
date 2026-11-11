@@ -2,7 +2,7 @@ import json
 import sys
 
 from django.db import transaction
-from django.http import JsonResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
@@ -68,6 +68,13 @@ def info(request):
         "implementation": sys.implementation.name,
         "executable": sys.executable,
     })
+
+
+def stream(request):
+    """Stream the body in chunks, sent by Phoenix as a chunked response."""
+    return StreamingHttpResponse(
+        (f"chunk {i}\n" for i in range(3)), content_type="text/plain"
+    )
 
 
 @csrf_exempt

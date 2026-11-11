@@ -14,6 +14,10 @@ defmodule Horingboom.HornbeamServer do
 
   @impl true
   def init(_) do
+    # So terminate/2 runs on shutdown and :hornbeam.stop/0 leaves nothing
+    # behind for a restart to inherit.
+    Process.flag(:trap_exit, true)
+
     django_path = Path.expand("../../python/django_app", __DIR__)
     venv_path = Path.join(django_path, ".venv")
 
@@ -28,17 +32,19 @@ defmodule Horingboom.HornbeamServer do
       end
 
     # Hornbeam always binds an HTTP listener. We don't want a second port —
-    # bind ephemerally and shut the listener down. Python runtime, worker pool,
+    # Django is served by HoringboomWeb.DjangoPlug on Phoenix's listener — so
+    # bind ephemerally and shut it down. Python runtime, context pool,
     # lifespan state, and registered callbacks stay alive.
-    :hornbeam.start("demo.wsgi:application", %{
-      bind: "127.0.0.1:0",
-      num_contexts: num_contexts,
-      worker_class: :wsgi,
-      venv: venv_path,
-      pythonpath: [django_path]
-    })
+    :ok =
+      :hornbeam.start("demo.wsgi:application", %{
+        bind: "127.0.0.1:0",
+        num_contexts: num_contexts,
+        worker_class: :wsgi,
+        venv: venv_path,
+        pythonpath: [django_path]
+      })
 
-    :ranch.stop_listener(:hornbeam_http)
+    :ok = :hornbeam_listener.stop_service()
 
     :hornbeam.register_function("system_info", fn _args ->
       %{
@@ -73,43 +79,13 @@ defmodule Horingboom.HornbeamServer do
       Horingboom.HornbeamServer.ecto_tx_rollback(tx_id)
     end)
 
-    inject_django_dispatch()
-
-    Logger.info("Hornbeam ready — Django mounted at /django/* on Phoenix's listener")
+    Logger.info("Hornbeam ready — Django served at /django/* by HoringboomWeb.DjangoPlug")
 
     {:ok, %{}}
   end
 
-  # Phoenix's Cowboy2Adapter reads :http from endpoint config and supports a
-  # :dispatch override (see deps/phoenix/lib/phoenix/endpoint/cowboy2_adapter.ex
-  # docstring). Patching the endpoint config here, before the endpoint child
-  # starts, gives us a single cowboy listener with /django/* routed to hornbeam
-  # and everything else through Phoenix.
-  defp inject_django_dispatch do
-    # Mirrors the map hornbeam builds internally at
-    # deps/hornbeam/src/hornbeam.erl:659-665 for its catchall handler. Not a
-    # public API — if upstream adds fields, Django requests will start failing.
-    django_state = %{
-      worker_class: :wsgi,
-      app_module: "demo.wsgi",
-      app_callable: "application",
-      timeout: 30_000,
-      lifespan_state: :hornbeam_lifespan.get_state()
-    }
-
-    dispatch = [
-      {:_,
-       [
-         {"/django/[...]", :hornbeam_handler, django_state},
-         {:_, Plug.Cowboy.Handler, {HoringboomWeb.Endpoint, []}}
-       ]}
-    ]
-
-    endpoint_config = Application.get_env(:horingboom, HoringboomWeb.Endpoint, [])
-    http_config = Keyword.get(endpoint_config, :http, []) |> Keyword.put(:dispatch, dispatch)
-    updated = Keyword.put(endpoint_config, :http, http_config)
-    Application.put_env(:horingboom, HoringboomWeb.Endpoint, updated)
-  end
+  @impl true
+  def terminate(_reason, _state), do: :hornbeam.stop()
 
   # Bridge: run SQL through Horingboom.Repo so Django's ORM can share Ecto's
   # connection pool. Tagged maps round-trip non-primitive types (datetimes,
@@ -147,14 +123,18 @@ defmodule Horingboom.HornbeamServer do
   defp decode_param(%{"__type__" => "decimal", "value" => s}), do: Decimal.new(s)
   defp decode_param(v), do: v
 
-  defp encode_value(%DateTime{} = v), do: %{"__type__" => "datetime", "value" => DateTime.to_iso8601(v)}
+  defp encode_value(%DateTime{} = v),
+    do: %{"__type__" => "datetime", "value" => DateTime.to_iso8601(v)}
 
   defp encode_value(%NaiveDateTime{} = v),
     do: %{"__type__" => "datetime", "value" => NaiveDateTime.to_iso8601(v)}
 
   defp encode_value(%Date{} = v), do: %{"__type__" => "date", "value" => Date.to_iso8601(v)}
   defp encode_value(%Time{} = v), do: %{"__type__" => "time", "value" => Time.to_iso8601(v)}
-  defp encode_value(%Decimal{} = v), do: %{"__type__" => "decimal", "value" => Decimal.to_string(v)}
+
+  defp encode_value(%Decimal{} = v),
+    do: %{"__type__" => "decimal", "value" => Decimal.to_string(v)}
+
   defp encode_value(v), do: v
 
   # Wrap each row as a tuple. A pure list of small integers gets optimized to

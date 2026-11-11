@@ -38,6 +38,9 @@ defmodule HoringboomWeb.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
+  # Django needs the raw request body, so it is served before Plug.Parsers.
+  plug HoringboomWeb.DjangoPlug
+
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],

@@ -2,10 +2,10 @@ defmodule Horingboom.IntegrationCase do
   @moduledoc """
   Test case for integration tests that need hornbeam/Django running.
 
-  Phoenix and Django share a single cowboy listener (HornbeamServer injects
-  /django/[...] into the endpoint dispatch at boot). These tests just hit
-  the Phoenix endpoint with real HTTP and rely on the app having booted
-  with `INTEGRATION=true`, which enables both `start_hornbeam` and the
+  Phoenix and Django share Phoenix's listener (HoringboomWeb.DjangoPlug
+  serves /django/* from the endpoint). These tests just hit the Phoenix
+  endpoint with real HTTP and rely on the app having booted with
+  `INTEGRATION=true`, which enables both `start_hornbeam` and the
   endpoint's `server` flag.
 
   Run with:
