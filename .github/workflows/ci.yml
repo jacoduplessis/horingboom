@@ -32,7 +32,7 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Erlang & Elixir
         uses: erlef/setup-beam@v1
@@ -41,7 +41,8 @@ jobs:
           elixir-version: "1.19"
 
       - name: Install Python 3.14 via uv
-        uses: astral-sh/setup-uv@v6
+        # No major tags since v8, so pin the release.
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           version: "latest"
 
@@ -61,7 +62,7 @@ jobs:
         run: uv sync
 
       - name: Cache Mix deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             deps
