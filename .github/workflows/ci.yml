@@ -56,6 +56,10 @@ jobs:
           echo "$PYTHON_ROOT/bin" >> $GITHUB_PATH
           # Hint for cmake's find_package(Python3)
           echo "Python3_ROOT=$PYTHON_ROOT" >> $GITHUB_ENV
+          # The erlang_python NIF dlopens libpython by the absolute path it was
+          # built against, so a cached build only fits this exact install
+          # (version and location; setup-uv v10 moved it).
+          echo "PYTHON_CACHE_KEY=$(realpath "$PYTHON_BIN" | sha256sum | cut -c1-16)" >> $GITHUB_ENV
 
       - name: Install Python dependencies
         working-directory: python/django_app
@@ -67,8 +71,8 @@ jobs:
           path: |
             deps
             _build
-          key: mix-${{ runner.os }}-${{ hashFiles('mix.lock') }}
-          restore-keys: mix-${{ runner.os }}-
+          key: mix-${{ runner.os }}-${{ env.PYTHON_CACHE_KEY }}-${{ hashFiles('mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-${{ env.PYTHON_CACHE_KEY }}-
 
       - name: Install Mix dependencies
         run: mix deps.get
